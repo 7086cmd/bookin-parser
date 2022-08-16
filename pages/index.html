@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/element-plus@2.2.0/dist/index.css"
+    />
+    <!-- Import Vue 3 -->
+    <script src="https://unpkg.com/vue@3"></script>
+    <!-- Import component library -->
+    <script src="https://unpkg.com/element-plus@2.2.0"></script>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <title>书链内容下载器</title>
+    <style>
+      .h3 {
+        font-size: 1.5rem;
+        padding-top: 2rem;
+      }
+      body {
+        text-align: center;
+        padding-left: 20%;
+        padding-right: 20%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app" v-loading="true">
+      <p class="h3">书链内容下载器</p>
+      <el-row>
+        <el-col :span="20">
+          <el-input v-model="link" placeholder="需要解析的链接"></el-input>
+        </el-col>
+        <el-col :span="4">
+          <el-button type="primary" text bg @click="parse">解析</el-button>
+        </el-col>
+      </el-row>
+      <el-divider></el-divider>
+      <el-card shadow="never" style="height: 32rem">
+        <el-table :data="links" v-loading="parsing_url" style="width: 100%" max-height="30rem">
+          <el-table-column type="index"></el-table-column>
+          <el-table-column prop="name" label="资源名称"></el-table-column>
+          <el-table-column prop="path" label="资源获取连接"></el-table-column>
+          <el-table-column label="资源类型">
+            <template #default="props">
+              <el-button v-if="!props.row.type" v-loading="props.row.type_loading" text bg type="warning" @click="checkurl(props)" size="small">解析</el-button>
+              <span v-else v-text="props.row.type"></span>
+            </template>
+          </el-table-column>
+          <el-table-column label="资源下载">
+            <template #default="props">
+              <el-button text bg type="success" size="small" v-if="!props.row.downloaded" :disabled="!props.row.type" @click="download(props)">下载</el-button>
+              <span v-else>已下载</span>
+            </template>
+        </el-table>
+      </el-card>
+      <el-dialog v-model="downloadingVideo" title="视频下载进度" width="60%" center>
+        <p>{{ downloadVideo.message }}</p>
+        <el-progress :percentage="downloadVideo.percentage" :status="downloadVideo.status" :indeterminate="downloadVideo.step !== 3 && downloadVideo.step !== 5">
+          <span v-if="downloadVideo.chunk < 0"></span>
+          <span v-else>{{ downloadVideo.chunk }} / {{ downloadVideo.max }}</span>
+        </el-progress>
+      </el-dialog>
+      <el-dialog v-model="downloadImage.downloading" title="图片下载进度" width="60%" center>
+        <p>{{ downloadImage.message }}</p>
+        <el-progress :percentage="downloadImage.percentage" :status="downloadImage.status" :indeterminate="downloadImage.step !== 2">
+          <span v-if="downloadImage.chunk < 0"></span>
+          <span v-else>{{ downloadImage.chunk }} / {{ downloadImage.max }}</span>
+        </el-progress>
+      </el-dialog>
+      <el-dialog v-model="downloadAudio.downloading" title="音频下载进度" width="60%" center>
+        <p>{{ downloadAudio.message }}</p>
+        <el-progress :percentage="downloadAudio.percentage" :status="downloadAudio.status" :indeterminate="downloadAudio.step !== 2"></el-progress>
+      </el-dialog>
+      <el-dialog v-model="downloadDocument.downloading" title="文档下载进度" width="60%" center>
+        <p>{{ downloadDocument.message }}</p>
+        <el-progress :percentage="downloadDocument.percentage" :status="downloadDocument.status" :indeterminate="downloadDocument.step !== 3 && downloadVideo.step !== 5"></el-progress>
+      </el-dialog>
+
+    </div>
+    <script>
+      Vue.createApp({
+        setup() {
+          const types = {
+            document: "文档",
+            resource: "资源",
+            image: "图片",
+            audio: "音频",
+            video: "视频",
+            unknown: "未知",
+          };
+          const { ref } = Vue;
+          const downloadingVideo = ref(false);
+          const parsing_url = ref(false);
+          const downloadVideo = ref({
+            message: "正在请求下载......",
+            percentage: 0,
+            step: 0,
+            chunk: -1,
+            max: 0,
+            status: "primary",
+          });
+          const downloadImage = ref({
+            message: "正在请求下载......",
+            percentage: 0,
+            step: 0,
+            chunk: -1,
+            max: 0,
+            status: "primary",
+            downloading: false,
+            order: 0,
+          });
+          const downloadAudio = ref({
+            message: "正在请求下载......",
+            percentage: 0,
+            step: 0,
+            status: "primary",
+            order: 0,
+            downloading: false,
+          });
+          const downloadDocument = ref({
+            message: "正在请求下载......",
+            percentage: 0,
+            step: 0,
+            status: "primary",
+            order: 0,
+            downloading: false,
+          });
+          const link = ref("");
+          const downloadingVideoOrder = ref(0);
+          const socket = io("http://localhost:3000");
+          const links = ref([]);
+          socket.on("download-video-result", (data) => {
+            console.log(data);
+            if (data.status === "Continue") {
+              downloadVideo.value.message = data.data;
+              downloadVideo.value.step = data.ord;
+              downloadVideo.value.percentage = data.percentage ?? 100;
+              if (data.ord === 2) {
+                downloadVideo.value.message = "即将开始下载，坐和放宽......";
+                setTimeout(() => {
+                  downloadVideo.value.step = 3;
+                  downloadVideo.value.message = "正在下载中，请稍后......";
+                  downloadVideo.value.chunk = 0;
+                  downloadVideo.value.max = data.fullist.length;
+                  downloadVideo.value.percentage =
+                    (1 / downloadVideo.value.max) * 100;
+                  socket.emit("download-video-piece", {
+                    fullist: data.fullist,
+                    order: 0,
+                    filename: links.value[downloadingVideoOrder.value].name,
+                  });
+                }, 1000);
+              }
+            } else if (data.status === "OK") {
+              downloadVideo.value.status = "success";
+              downloadVideo.value.message = "下载完成";
+              downloadVideo.value.step = 5;
+              links.value[downloadingVideoOrder.value].downloaded = true;
+              downloadingVideo.value = false;
+            } else if (data.status === "Error") {
+              downloadVideo.value.step = -1;
+              downloadVideo.value.message = "下载出错：" + data.reason;
+              downloadVideo.value.status = "error";
+            }
+          });
+          socket.on("download-audio-result", (data) => {
+            console.log(data);
+            if (data.status === "Continue") {
+              downloadAudio.value.message = data.data;
+              downloadAudio.value.step = data.ord;
+              if (data.ord === 2) {
+                downloadAudio.value.message = (data.data * 100).toFixed(2) + "%";
+                downloadAudio.value.percentage = data.data * 100;
+              }
+            } else if (data.status === "OK") {
+              downloadAudio.value.status = "success";
+              downloadAudio.value.message = "下载完成";
+              links.value[downloadAudio.value.order].downloaded = true;
+              downloadAudio.downloading = false;
+            } else if (data.status === "Error") {
+              downloadAudio.value.step = -1;
+              downloadAudio.value.message = "下载出错：" + data.reason;
+              downloadAudio.value.status = "error";
+            }
+          });
+          socket.on("download-image-result", (data) => {
+            console.log(data);
+            if (data.status === "Continue") {
+              downloadImage.value.message = data.data;
+              downloadImage.value.step = data.ord;
+              downloadImage.value.percentage = data.percentage ?? 100;
+              if (data.ord === 1) {
+                downloadImage.value.message = "即将开始下载，坐和放宽......";
+                setTimeout(() => {
+                  console.log(downloadImage.value.max)
+                  downloadImage.value.step = 2;
+                  downloadImage.value.message = "正在下载中，请稍后......";
+                  downloadImage.value.chunk = 0;
+                  downloadImage.value.max = data.fullist.length;
+                  downloadImage.value.percentage =
+                    (1 / downloadImage.value.max) * 100;
+                  socket.emit("download-image-piece", {
+                    fullist: data.fullist,
+                    order: 0,
+                    filename: links.value[downloadImage.value.order].name,
+                  });
+                }, 1000);
+              }
+            } else if (data.status === "OK") {
+              downloadImage.value.status = "success";
+              downloadImage.value.message = "下载完成";
+              downloadImage.value.step = 5;
+              links.value[downloadImage.value.order].downloaded = true;
+              downloadingVideo.value = false;
+            } else if (data.status === "Error") {
+              downloadImage.value.step = -1;
+              downloadImage.value.message = "下载出错：" + data.reason;
+              downloadImage.value.status = "error";
+            }
+          });
+          socket.on("download-image-piece-result", (data) => {
+            console.log(data);
+            if (data.status === "Continue") {
+              console.log(data.data.order + 2, downloadImage.value.max, 100)
+              downloadImage.value.percentage =
+                ((data.data.order + 2) / downloadImage.value.max) * 100;
+                downloadImage.value.chunk = data.data.order + 2;
+              socket.emit("download-image-piece", {
+                fullist: data.data.fullist,
+                order: data.data.order + 1,
+                filename: data.data.filename,
+              });
+            } else if (data.status === "OK") {
+              downloadImage.value.step = 4;
+              downloadImage.value.message = "切片图片完成，正在合并";
+            } else if (data.status === "Error") {
+              downloadImage.value.step = -1;
+              downloadImage.value.message = "下载图片出错：" + data.reason;
+              downloadImage.value.status = "error";
+            }
+          });
+          socket.on("download-document-result", (data) => {
+            console.log(data);
+            if (data.status === "Continue") {
+              downloadDocument.value.message = data.data;
+              downloadDocument.value.step = data.ord;
+              if (data.ord === 3) {
+                downloadDocument.value.message = (data.data * 100).toFixed(2) + "%";
+                downloadDocument.value.percentage = data.data * 100;
+              }
+            } else if (data.status === "OK") {
+              downloadDocument.value.status = "success";
+              downloadDocument.value.message = "下载完成";
+              links.value[downloadDocument.value.order].downloaded = true;
+              downloadDocument.downloading = false;
+            } else if (data.status === "Error") {
+              downloadDocument.value.step = -1;
+              downloadDocument.value.message = "下载出错：" + data.reason;
+              downloadDocument.value.status = "error";
+            }
+          });
+
+          socket.on("download-video-piece-result", (data) => {
+            console.log(data);
+            if (data.status === "Continue") {
+              downloadVideo.value.percentage =
+                ((data.data.order + 2) / downloadVideo.value.max) * 100;
+              downloadVideo.value.chunk = data.data.order + 2;
+              socket.emit("download-video-piece", {
+                fullist: data.data.fullist,
+                order: data.data.order + 1,
+                filename: data.data.filename,
+              });
+            } else if (data.status === "OK") {
+              downloadVideo.value.step = 4;
+              downloadVideo.value.message = "切片下载完成，正在合并";
+            } else if (data.status === "Error") {
+              downloadVideo.value.step = -1;
+              downloadVideo.value.message = "下载切片出错：" + data.reason;
+              downloadVideo.value.status = "error";
+            }
+          });
+          socket.on("document-result", (data) => {
+            console.log("ok");
+            console.log(data);
+            links.value = data.data.map((item) => {
+              return {
+                ...item,
+                type_loading: false,
+                downloading: false,
+              };
+            });
+            parsing_url.value = false;
+          });
+          socket.on("checkurl-result", (data) => {
+            // console.log(data)
+            links.value[data.data.order].type = types[data.data.result];
+            links.value[data.data.order].type_loading = false;
+          });
+          return {
+            link,
+            parse() {
+              parsing_url.value = true;
+              socket.emit("document", link.value);
+            },
+            links,
+            checkurl(props) {
+              const furl = link.value;
+              const uri = new URL(furl);
+              const url_then = uri.origin + props.row.path;
+              props.row.type_loading = true;
+              console.log("Start to check url: ", url_then);
+              socket.emit("checkurl", {
+                url: url_then,
+                index: props.$index,
+              });
+            },
+            parsing_url,
+            download(props) {
+              if (!props.row.type) checkurl(props);
+              const furl = link.value;
+              const uri = new URL(furl);
+              const url_then = uri.origin + props.row.path;
+              props.row.downloading = true;
+              console.log("Start to download with url: ", url_then);
+              if (props.row.type === "视频") {
+                downloadVideo.value = {
+                  message: "正在请求下载......",
+                  percentage: 0,
+                  step: 0,
+                  chunk: -1,
+                  max: 0,
+                  status: "primary",
+                };
+                downloadingVideoOrder.value = props.$index;
+                downloadingVideo.value = true;
+                socket.emit("download-video", {
+                  url: url_then,
+                  name: props.row.name.trim(),
+                });
+              } else if (props.row.type === "音频") {
+                downloadAudio.value = {
+                  message: "正在请求下载......",
+                  percentage: 0,
+                  step: 0,
+                  order: props.$index,
+                  status: "primary",
+                  downloading: true
+                };
+                socket.emit("download-audio", {
+                  url: url_then,
+                  name: props.row.name.trim(),
+                });
+              } else if (props.row.type === "文档") {
+                downloadDocument.value = {
+                  message: "正在请求下载......",
+                  percentage: 0,
+                  step: 0,
+                  order: props.$index,
+                  status: "primary",
+                  downloading: true
+                };
+                socket.emit("download-document", {
+                  url: url_then,
+                  name: props.row.name.trim(),
+                });
+              } else if (props.row.type === "图片") {
+                downloadImage.value = {
+                  message: "正在请求下载......",
+                  percentage: 0,
+                  step: 0,
+                  order: props.$index,
+                  status: "primary",
+                  downloading: true
+                };
+                socket.emit("download-image", {
+                  url: url_then,
+                  name: props.row.name.trim(),
+                });
+              }
+            },
+            downloadVideo,
+            downloadingVideo,
+            downloadAudio,
+            downloadDocument,
+            downloadImage,
+          };
+        },
+      })
+        .use(ElementPlus)
+        .mount("#app");
+
+    </script>
+  </body>
+</html>
